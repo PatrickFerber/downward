@@ -1,19 +1,26 @@
 #! /usr/bin/env python3
 
+import datetime
 import re
 import subprocess
 import sys
 
-PATTERN_ISSUE_BRANCHES = r"issue\d+"
-REGEX_ISSUE_BRANCH = re.compile(PATTERN_ISSUE_BRANCHES)
 LEGACY_BRANCH_NAMES = ["issue329test", "ijcai-2011", "hcea-cleanup",
                        "raz-ipc-integration", "emil-new-integration"]
+PATTERN_ISSUE_BRANCHES = r"issue\d+|{}".format("|".join(LEGACY_BRANCH_NAMES))
+REGEX_ISSUE_BRANCH = re.compile(PATTERN_ISSUE_BRANCHES)
 REGEX_COMMIT_MESSAGE_BRANCH = re.compile(
-    r"\[(main|{}|release-\d\d\.\d\d|{})\].*".format(
-        PATTERN_ISSUE_BRANCHES, "|".join(LEGACY_BRANCH_NAMES)))
+    r"\[(main|{}|release-\d\d\.\d\d)\].*".format(PATTERN_ISSUE_BRANCHES))
 
 REF_HEADS_PREFIX = "refs/heads/"
 MAIN = "main"
+
+
+def convert_to_datetime(timestamp):
+    return datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S %z")
+
+
+TIMESTAMP_LEGACY = convert_to_datetime("2020-07-10 23:59:59 +0200")
 
 
 def check_at_most_two_parents():
@@ -81,16 +88,16 @@ def check_branch_parent_consistency():
     inconsistent_commits = []
 
     commits = subprocess.check_output(
-        ["git", "log", "--all", "--pretty=%H;%P;%s"]
+        ["git", "log", "--all", "--pretty=%H;%P;%ai;%s"]
     ).decode().splitlines()
-
-    # Parsed entry format: (HASH_COMMIT, [HASH_PARENT_i, ...], MESSAGE)
-    commits = [c.split(";", 2) for c in commits]
+    # Parsed entry format: (HASH_COMMIT, [HASH_PARENT_i, ...], DATE, MESSAGE)
+    commits = [c.split(";", 3) for c in commits]
     for c in commits:
         c[1] = c[1].split()
-    hash2message = {c[0]: c[2] for c in commits}
+        c[2] = convert_to_datetime(c[2])
+    hash2message = {c[0]: c[3] for c in commits}
 
-    for commit_hash, parents, commit_message in commits:
+    for commit_hash, parents, timestamp, commit_message in commits:
         commit_branch = REGEX_COMMIT_MESSAGE_BRANCH.match(commit_message)
         if commit_branch is None:
             continue  # another test will report this error
@@ -108,6 +115,8 @@ def check_branch_parent_consistency():
                     "}".format(commit_hash, commit_branch, MAIN))
 
         elif len(parent_branches) == 1:
+            if timestamp < TIMESTAMP_LEGACY:
+                continue
             # commit on main -> parent on main
             # commit not on main -> parent on same branch or on main branch
             if parent_branches[0] != MAIN and parent_branches[0] != commit_branch:
@@ -116,6 +125,8 @@ def check_branch_parent_consistency():
                     "'{}'".format(commit_hash, commit_branch, parent_branches[0]))
 
         else:
+            if timestamp < TIMESTAMP_LEGACY:
+                continue
             # We do not care if more than 2 parents are present. This is checked
             # by check_at_most_two_parents
             if commit_branch == MAIN:
