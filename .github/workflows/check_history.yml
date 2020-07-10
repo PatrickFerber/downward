@@ -1,0 +1,18 @@
+name: CI
+on:
+  push:
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  check-history:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with: 
+        fetch-depth: 0
+    - name: Run tox history checks
+      run: |
+        sudo apt-get -y install python3 tox
+        cd misc
+        tox -e history
