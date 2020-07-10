@@ -46,7 +46,9 @@ def check_branch_name_in_commit_messages():
         c for c in commits
         if REGEX_COMMIT_MESSAGE_BRANCH.match(c[c.find(";") + 1:]) is None]
     if len(invalid_commits) > 0:
-        print("Some commit message do not prepend a valid branch name:")
+        print(
+            "{} commit message(s) do not prepend a valid branch name:".format(
+                len(invalid_commits)))
         print("\n".join(invalid_commits))
         return False
     else:
