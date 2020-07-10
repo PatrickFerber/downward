@@ -1,5 +1,6 @@
 #! /usr/bin/env python3
 
+from collections import defaultdict
 import datetime
 import re
 import subprocess
@@ -30,9 +31,9 @@ def check_at_most_two_parents():
          "--pretty=%H;%s"]
     ).decode().splitlines()
     if len(bad_merges) > 0:
-        print("The following merges have more than "
-              "{} parents:".format(max_parents))
-        print("\n".join(bad_merges))
+        print("{} merge(s) have more than "
+              "{} parents:".format(len(bad_merges), max_parents))
+        print("\n".join("Error: {}".format(x) for x in bad_merges))
         return False
     else:
         return True
@@ -44,12 +45,12 @@ def check_branch_name_in_commit_messages():
     ).decode().splitlines()
     invalid_commits = [
         c for c in commits
-        if REGEX_COMMIT_MESSAGE_BRANCH.match(c[c.find(";") + 1:]) is None]
+        if not REGEX_COMMIT_MESSAGE_BRANCH.match(c[c.find(";") + 1:])]
     if len(invalid_commits) > 0:
         print(
             "{} commit message(s) do not prepend a valid branch name:".format(
                 len(invalid_commits)))
-        print("\n".join(invalid_commits))
+        print("\n".join("Error: {}".format(x) for x in invalid_commits))
         return False
     else:
         return True
@@ -80,15 +81,76 @@ def check_branch_head_consistent():
                 "}'.".format(commit_hash, head_branch, msg_branch))
 
     if len(inconsistent_commits) != 0:
-        print("\n".join(inconsistent_commits))
+        print("{} commit(s) associated to a branch ref state(s) that they "
+              "belong to a different branch".format(len(inconsistent_commits)))
+        print("\n".join("Error: {}".format(x) for x in inconsistent_commits))
         return False
     else:
         return True
 
 
-def check_branch_parent_consistency():
-    inconsistent_commits = []
+RULE_SINGLE_ROOT = "single_root"
+RULE_SINGLE_PARENT = "single_parent_on_main_or_same_branch"
+RULE_MERGE_INTO_NEW_BRANCH = "merge_into_new_branch"
+RULE_MERGE_FIRST_PARENT_SAME_BRANCH = "merge_first_parent_same_branch"
+RULE_MERGE_ISSUE_WITH_ITSELF = "merge_issue_branch_with_itself"
+RULE_MERGE_INVALID_BRANCH_INTO_MAIN = "merge_invalid_branch_into_main"
+RULE_MERGE_ISSUE_INTO_ISSUE = "merge_issue_into_issue"
 
+ERROR_RULES = [
+    RULE_SINGLE_ROOT, RULE_MERGE_INTO_NEW_BRANCH,
+    RULE_MERGE_INVALID_BRANCH_INTO_MAIN, RULE_MERGE_FIRST_PARENT_SAME_BRANCH]
+WARNING_RULES = [
+    RULE_SINGLE_PARENT, RULE_MERGE_ISSUE_WITH_ITSELF, RULE_MERGE_ISSUE_INTO_ISSUE]
+
+
+def _check_0_parent_consistency(commit_hash, commit_branch, rule_violations):
+    if commit_branch != MAIN:
+        rule_violations[RULE_SINGLE_ROOT].append(
+            "Commit '{}' ({}) has no parent, but is not the root of {"
+            "}".format(commit_hash, commit_branch, MAIN))
+
+
+def _check_1_parent_consistency(commit_hash, commit_branch, parent_branch,
+                                rule_violations):
+    # commit on main -> parent on main
+    # commit not on main -> parent on same branch or on main branch
+    if parent_branch != MAIN and parent_branch != commit_branch:
+        rule_violations[RULE_SINGLE_PARENT].append(
+            "Commit '{}' ({}) has its parent on a another branch which is not "
+            "main: '{}'".format(commit_hash, commit_branch, parent_branch))
+
+
+def _check_2_parent_consistency(
+        commit_hash, commit_branch, parent_branches, rule_violations):
+    def _add_violation(rule):
+        rule_violations[rule].append(
+            "Commit '{}' ({}) has parents on disallowed/discourage branches or "
+            "has an invalid parent order: {}".format(
+                commit_hash, commit_branch, ", ".join(parent_branches)))
+
+    assert len(parent_branches) == 2
+    first_parent, second_parent = parent_branches
+
+    if all(x != commit_branch for x in parent_branches):
+        _add_violation(RULE_MERGE_INTO_NEW_BRANCH)
+    elif first_parent != commit_branch:
+        _add_violation(RULE_MERGE_FIRST_PARENT_SAME_BRANCH)
+    elif commit_branch == MAIN:
+        # commit on main -> first parent main, others issue*
+        assert first_parent == MAIN
+        if not REGEX_ISSUE_BRANCH.match(second_parent):
+            _add_violation(RULE_MERGE_INVALID_BRANCH_INTO_MAIN)
+    else:
+        assert first_parent == commit_branch
+        if second_parent == commit_branch:
+            _add_violation(RULE_MERGE_ISSUE_WITH_ITSELF)
+        elif second_parent != MAIN:
+            _add_violation(RULE_MERGE_ISSUE_INTO_ISSUE)
+
+
+def check_branch_parent_consistency():
+    rule_violations = defaultdict(list)  # stores the messages to output
     commits = subprocess.check_output(
         ["git", "log", "--all", "--pretty=%H;%P;%ai;%s"]
     ).decode().splitlines()
@@ -100,6 +162,8 @@ def check_branch_parent_consistency():
     hash2message = {c[0]: c[3] for c in commits}
 
     for commit_hash, parents, timestamp, commit_message in commits:
+        if timestamp < TIMESTAMP_LEGACY:
+            continue
         commit_branch = REGEX_COMMIT_MESSAGE_BRANCH.match(commit_message)
         if commit_branch is None:
             continue  # another test will report this error
@@ -111,49 +175,32 @@ def check_branch_parent_consistency():
             parent_branches.append(pbranch.group(1) if pbranch else pbranch)
 
         if len(parent_branches) == 0:
-            if commit_branch != MAIN:
-                inconsistent_commits.append(
-                    "Commit '{}' ({}) has no parent, but is not the root of {"
-                    "}".format(commit_hash, commit_branch, MAIN))
-
+            _check_0_parent_consistency(
+                commit_hash, commit_branch, rule_violations)
         elif len(parent_branches) == 1:
-            if timestamp < TIMESTAMP_LEGACY:
-                continue
-            # commit on main -> parent on main
-            # commit not on main -> parent on same branch or on main branch
-            if parent_branches[0] != MAIN and parent_branches[0] != commit_branch:
-                inconsistent_commits.append(
-                    "Commit '{}' ({}) has its parent on a disallowed branch: "
-                    "'{}'".format(commit_hash, commit_branch, parent_branches[0]))
+            _check_1_parent_consistency(
+                commit_hash, commit_branch, parent_branches[0], rule_violations)
+        elif len(parent_branches) == 2:
+            _check_2_parent_consistency(
+                commit_hash, commit_branch, parent_branches, rule_violations)
+        # commits with more than 2 parents are already reported as error
 
-        else:
-            if timestamp < TIMESTAMP_LEGACY:
-                continue
-            # We do not care if more than 2 parents are present. This is checked
-            # by check_at_most_two_parents
-            if commit_branch == MAIN:
-                # commit on main -> first parent main, others issue*
-                if (parent_branches[0] != MAIN or
-                        any(not REGEX_ISSUE_BRANCH.match(x)
-                            for x in parent_branches[1:])):
-                    inconsistent_commits.append(
-                        "Commit '{}' ({}) has parents on disallowed branches or "
-                        "has an invalid parent order: {}".format(
-                            commit_hash, commit_branch, ", ".join(parent_branches)))
-            else:
-                # commit on X -> first parent has to be on X, other has to be main
-                if (parent_branches[0] != commit_branch or
-                        any(x != MAIN for x in parent_branches[1:])):
-                    inconsistent_commits.append(
-                        "Commit '{}' ({}) has parents on disallowed branches or "
-                        "has an invalid parent order: {}".format(
-                            commit_hash, commit_branch, ", ".join(parent_branches)))
-
-    if len(inconsistent_commits) != 0:
-        print("\n".join(inconsistent_commits))
+    count_warnings = sum(len(rule_violations[rule]) for rule in WARNING_RULES)
+    if count_warnings > 0:
+        print("Warning: {} commit(s) have an undesired parent "
+              "relationship.".format(count_warnings))
+        for rule in WARNING_RULES:
+            if len(rule_violations[rule]) > 0:
+                print("\n".join("Warning: {}".format(x) for x in rule_violations[rule]))
+    count_errors = sum(len(rule_violations[rule]) for rule in ERROR_RULES)
+    if count_errors > 0:
+        print("Error: {} commit(s) have an prohibited parent "
+              "relationship.".format(count_errors))
+        for rule in ERROR_RULES:
+            if len(rule_violations[rule]) > 0:
+                print("\n".join("Error: {}".format(x) for x in rule_violations[rule]))
         return False
-    else:
-        return True
+    return True
 
 
 def main():
