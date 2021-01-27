@@ -111,40 +111,53 @@ def _check_0_parent_consistency(commit_hash, commit_branch, rule_violations):
             "}".format(commit_hash, commit_branch, MAIN))
 
 
-def _check_1_parent_consistency(commit_hash, commit_branch, parent_branch,
-                                rule_violations):
+def _check_1_parent_consistency(
+        commit_hash, commit_branch, parent_branch, rule_violations):
     # commit on main -> parent on main
     # commit not on main -> parent on same branch or on main branch
     if parent_branch != MAIN and parent_branch != commit_branch:
         rule_violations[RULE_SINGLE_PARENT].append(
             "Commit '{}' ({}) has its parent on a another branch which is not "
-            "main: '{}'".format(commit_hash, commit_branch, parent_branch))
+            "main: '{}'".format(
+                commit_hash, commit_branch,
+                parent_branch if parent_branch else "BRANCH UNKNOWN"))
 
 
 def _check_2_parent_consistency(
         commit_hash, commit_branch, parent_branches, rule_violations):
-    def _add_violation(rule):
-        rule_violations[rule].append(
-            "Commit '{}' ({}) has parents on disallowed/discourage branches or "
-            "has an invalid parent order: {}".format(
+    def _add_violation(rule, message):
+        rule_violations[rule].append(message.format(
                 commit_hash, commit_branch, ", ".join(parent_branches)))
 
     assert len(parent_branches) == 2
     first_parent, second_parent = parent_branches
-
+    "Commit '{0}' ({1}) has parents on disallowed/discourage branches or "
+    "has an invalid parent order: {2}"
     if all(x != commit_branch for x in parent_branches):
-        _add_violation(RULE_MERGE_INTO_NEW_BRANCH)
+        _add_violation(
+            RULE_MERGE_INTO_NEW_BRANCH,
+            "Commit '{0}' ({1}) creates a new branch by merging {2}.")
     elif first_parent != commit_branch:
-        _add_violation(RULE_MERGE_FIRST_PARENT_SAME_BRANCH)
+        _add_violation(
+            RULE_MERGE_FIRST_PARENT_SAME_BRANCH,
+            "Merge '{0}' ({1}) should have its own branch as first parent ("
+            "parents: {2}).")
     elif commit_branch == MAIN:
         # commit on main -> first parent main, others issue*
         assert first_parent == MAIN
         if not REGEX_ISSUE_BRANCH.match(second_parent):
-            _add_violation(RULE_MERGE_INVALID_BRANCH_INTO_MAIN)
+            _add_violation(
+                RULE_MERGE_INVALID_BRANCH_INTO_MAIN,
+                "Commit '{0}' ({1}) merges a forbidden branch into %s ("
+                "parents: {2})." % MAIN)
     else:
         assert first_parent == commit_branch
+        assert False, "TODO: continue"
         if second_parent == commit_branch:
-            _add_violation(RULE_MERGE_ISSUE_WITH_ITSELF)
+            _add_violation(
+                RULE_MERGE_ISSUE_WITH_ITSELF,
+            )
+
         elif second_parent != MAIN:
             _add_violation(RULE_MERGE_ISSUE_INTO_ISSUE)
 
@@ -163,7 +176,7 @@ def check_branch_parent_consistency():
 
     for commit_hash, parents, timestamp, commit_message in commits:
         if timestamp < TIMESTAMP_LEGACY:
-            continue
+            pass  # continue
         commit_branch = REGEX_COMMIT_MESSAGE_BRANCH.match(commit_message)
         if commit_branch is None:
             continue  # another test will report this error
